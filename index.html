@@ -6107,5 +6107,423 @@ if(!window.THREE){
   init();
 }
 </script>
+<script>
+(function () {
+  "use strict";
+
+  const style = document.createElement("style");
+  style.textContent = `
+    #upgradeGoals {
+      max-height: 72vh;
+      max-height: 72dvh;
+    }
+    #upgradeGoals .goal-row {
+      padding: 12px;
+      margin-top: 8px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+    #upgradeGoals .goal-current {
+      border-color: var(--accent);
+      background: rgba(242,177,52,.08);
+    }
+    #upgradeGoals .goal-done {
+      color: var(--good);
+    }
+    #upgradeGoals button {
+      min-height: 44px;
+    }
+    #upgradeGoals .goal-row button {
+      display: block;
+      margin-top: 8px;
+    }
+    #questBar {
+      cursor: pointer;
+      border-radius: 14px;
+      min-height: 44px;
+      text-align: left;
+    }
+    #questBar:focus-visible,
+    #upgradeGoals button:focus-visible {
+      outline: 2px solid var(--accent2);
+      outline-offset: 3px;
+    }
+    @media (max-width: 560px) {
+      #hudBtns {
+        overflow-x: auto;
+        scrollbar-width: thin;
+        padding-bottom: 4px;
+      }
+      #hudBtns button {
+        flex: 0 0 auto;
+        min-width: 64px;
+        min-height: 44px;
+        padding: 8px 10px;
+        font-size: 12px;
+        white-space: nowrap;
+      }
+      #questBar {
+        width: calc(100% - 24px);
+        max-height: 80px;
+        overflow-y: auto;
+        font-size: 12px;
+      }
+    }
+  `;
+  document.head.appendChild(style);
+
+  /*
+   * Show a useful message if the original game's 3D startup
+   * failed before its welcome buttons could be connected.
+   */
+  if (
+    typeof renderer === "undefined" ||
+    !renderer ||
+    typeof player === "undefined" ||
+    !player
+  ) {
+    const panel = document.createElement("section");
+    panel.setAttribute("role", "alert");
+    panel.style.cssText = `
+      position: fixed;
+      inset: 0;
+      z-index: 10000;
+      background: #0d1117;
+      color: #eef3f8;
+      padding: 32px;
+      display: grid;
+      align-content: center;
+      justify-items: start;
+      gap: 16px;
+      overflow: auto;
+    `;
+
+    const title = document.createElement("h1");
+    title.textContent = "The neighborhood couldn't load";
+
+    const message = document.createElement("p");
+    message.style.maxWidth = "560px";
+    message.textContent =
+      "The 3D engine could not start. Check your connection, " +
+      "then try reopening the game in Safari, Chrome, or Edge. " +
+      "Your saved progress has not been reset.";
+
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "primary";
+    retry.textContent = "Try again";
+    retry.onclick = function () {
+      location.reload();
+    };
+
+    panel.append(title, message, retry);
+    document.body.appendChild(panel);
+    retry.focus();
+    return;
+  }
+
+  const sheet = document.createElement("section");
+  sheet.id = "upgradeGoals";
+  sheet.className = "sheet";
+  sheet.setAttribute("aria-label", "Objectives and places");
+  sheet.innerHTML = `
+    <div class="closeRow">
+      <h2>Your next chapter</h2>
+      <button type="button" id="upgradeClose">Close</button>
+    </div>
+    <p>One step at a time. Choose a goal or a place to visit.</p>
+    <div id="upgradeChecklist"></div>
+    <h3>Explore the neighborhood</h3>
+    <p>Walking is free. Select a place to walk to its entrance.</p>
+    <div id="upgradePlaces" class="actGrid"></div>
+  `;
+  document.body.appendChild(sheet);
+
+  document.getElementById("upgradeClose").onclick = closeSheets;
+
+  const menuButton = document.createElement("button");
+  menuButton.type = "button";
+  menuButton.textContent = "Goals & Places";
+  document.getElementById("hudBtns").prepend(menuButton);
+
+  const labels = [
+    "Explore Maple Street",
+    "Visit Dot's Diner",
+    "Have a meal",
+    "Meet a neighbor",
+    "Find your first job",
+    "Rest at home"
+  ];
+
+  const destinations = {
+    enter: "diner",
+    eat: "diner",
+    talk: "diner",
+    sleep: "home"
+  };
+
+  function walkTo(key) {
+    if (busy) {
+      toast("Finish your current activity before heading out.");
+      return;
+    }
+
+    const venue = VENUES[key];
+    if (!venue) return;
+
+    if (key.indexOf("east") === 0 && !S.eastUnlocked) {
+      toast("Eastside opens at score 250 or Day 12.");
+      return;
+    }
+
+    closeSheets();
+
+    if (currentLoc === key) {
+      toast(
+        "You are here. Walk to a glowing ring for activities, " +
+        "or find a neighbor to talk to."
+      );
+      return;
+    }
+
+    cancelWalk();
+    pendingStation = null;
+    pendingExit = false;
+    followId = null;
+
+    if (currentLoc !== "street") {
+      const room = interiorGroups[currentLoc];
+      pendingExit = true;
+      moveTarget = {
+        x: room.exit.x,
+        z: room.exit.z,
+        venue: key
+      };
+    } else {
+      startWalk(venue.door.x, venue.door.z + 0.6, key);
+    }
+
+    toast(
+      "Walking to " + venue.name +
+      ". Use the movement controls to cancel."
+    );
+  }
+
+  function renderGoals() {
+    const checklist = document.getElementById("upgradeChecklist");
+    checklist.replaceChildren();
+
+    TUT_STEPS.forEach(function (step, index) {
+      const done = S.tutorial.done || index < S.tutorial.step;
+      const active = !S.tutorial.done && index === S.tutorial.step;
+
+      const row = document.createElement("div");
+      row.className =
+        "goal-row" +
+        (done ? " goal-done" : active ? " goal-current" : "");
+
+      row.textContent =
+        (done ? "✓ " : active ? "Next · " : "") +
+        (index + 1) + ". " + labels[index];
+
+      if (active) {
+        const hint = document.createElement("p");
+        hint.textContent = step.text.replace("Quest: ", "");
+        row.appendChild(hint);
+
+        const destination = destinations[step.id];
+
+        if (destination || step.id === "job") {
+          const action = document.createElement("button");
+          action.type = "button";
+          action.className = "primary";
+          action.textContent = destination
+            ? "Walk to " + VENUES[destination].short
+            : "Browse careers";
+
+          action.onclick = function () {
+            if (destination) {
+              walkTo(destination);
+            } else {
+              renderCareer();
+              openSheet("careerSheet");
+            }
+          };
+
+          row.appendChild(action);
+        }
+      }
+
+      checklist.appendChild(row);
+    });
+
+    const dinerGoal = dinerQuestText();
+
+    if (dinerGoal) {
+      const action = document.createElement("button");
+      action.type = "button";
+      action.className = "actBtn";
+      action.style.marginTop = "12px";
+      action.textContent = dinerGoal + " Get directions →";
+      action.onclick = function () {
+        walkTo("diner");
+      };
+      checklist.appendChild(action);
+    }
+
+    const places = document.getElementById("upgradePlaces");
+    places.replaceChildren();
+
+    venueKeys.forEach(function (key) {
+      const venue = VENUES[key];
+      const locked =
+        key.indexOf("east") === 0 && !S.eastUnlocked;
+
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "actBtn";
+      button.disabled = locked;
+
+      button.textContent =
+        venue.name +
+        (locked
+          ? " · Unlock at score 250 / Day 12"
+          : currentLoc === key
+            ? " · You are here"
+            : " · Walk here");
+
+      button.onclick = function () {
+        walkTo(key);
+      };
+
+      places.appendChild(button);
+    });
+  }
+
+  function showGoals() {
+    renderGoals();
+    openSheet("upgradeGoals");
+  }
+
+  menuButton.onclick = showGoals;
+
+  const questBar = document.getElementById("questBar");
+  questBar.setAttribute("role", "button");
+  questBar.setAttribute("tabindex", "0");
+  questBar.setAttribute("aria-label", "Open current objectives");
+  questBar.onclick = showGoals;
+
+  questBar.addEventListener("keydown", function (event) {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      event.stopPropagation();
+      showGoals();
+    }
+  });
+
+  TUT_STEPS[1].text =
+    "Quest: Visit Dot's Diner. Tap here for directions.";
+
+  /*
+   * The original tutorial accepted entry into any building.
+   * Require the diner for its diner objective.
+   */
+  const originalAdvanceTutorial = advanceTutorial;
+  advanceTutorial = function (event) {
+    const step = tutStep();
+
+    if (
+      step &&
+      step.id === "enter" &&
+      event !== "enter:diner"
+    ) {
+      return;
+    }
+
+    return originalAdvanceTutorial(event);
+  };
+
+  renderQuest = function () {
+    const step = tutStep();
+    const dinerGoal = dinerQuestText();
+
+    questBar.style.display = "block";
+
+    if (step) {
+      questBar.textContent =
+        "First day · " +
+        (S.tutorial.step + 1) + "/" + TUT_STEPS.length +
+        " · " + step.text.replace("Quest: ", "");
+    } else if (dinerGoal) {
+      questBar.textContent = dinerGoal + " Tap for directions.";
+    } else if (S.arcComplete && S.weeklyGoal) {
+      questBar.textContent = "Weekly goal: " + S.weeklyGoal;
+    } else {
+      questBar.textContent =
+        "Choose your next goal · Explore the neighborhood";
+    }
+
+    if (sheet.classList.contains("open")) {
+      renderGoals();
+    }
+  };
+
+  /*
+   * Stop typing in text fields from becoming movement.
+   * Clear held movement keys when focus leaves the game.
+   */
+  function clearMovement() {
+    Object.keys(keys).forEach(function (key) {
+      keys[key] = false;
+    });
+
+    joyVec.x = 0;
+    joyVec.y = 0;
+
+    const knob = document.getElementById("joyKnob");
+    if (knob) knob.style.transform = "translate(0,0)";
+  }
+
+  window.addEventListener("keydown", function (event) {
+    const target = event.target;
+    const tag = target && target.tagName
+      ? target.tagName.toLowerCase()
+      : "";
+
+    const editing =
+      tag === "input" ||
+      tag === "textarea" ||
+      tag === "select" ||
+      (target && target.isContentEditable);
+
+    const movementKey = [
+      "w", "a", "s", "d",
+      "arrowup", "arrowdown", "arrowleft", "arrowright"
+    ].includes(event.key.toLowerCase());
+
+    if (
+      editing ||
+      event.ctrlKey ||
+      event.metaKey ||
+      event.altKey ||
+      (movementKey && overlayUp())
+    ) {
+      clearMovement();
+      event.stopImmediatePropagation();
+    }
+  }, true);
+
+  window.addEventListener("blur", clearMovement);
+  document.addEventListener("focusin", clearMovement);
+  document.addEventListener("visibilitychange", function () {
+    if (document.hidden) clearMovement();
+  });
+
+  renderQuest();
+})();
+</script>
+
 </body>
 </html>
